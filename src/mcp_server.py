@@ -1,134 +1,129 @@
 import requests
 import json
-from crewai.tools import tool
+from pydantic import BaseModel, Field
+from crewai.tools import BaseTool
 
-@tool
-def geocode_location(query: str) -> str:
-    """
-    Geocodes a text query (like a city, landmark, or address) into latitude and longitude coordinates.
+# ---------------------------------------------------------
+# Pydantic Input Schemas
+# ---------------------------------------------------------
+class GeocodeInput(BaseModel):
+    query: str = Field(
+        ..., 
+        description="Name of the location to search (e.g., 'Tokyo, Japan'). Append country name for accuracy."
+    )
+
+class WeatherInput(BaseModel):
+    latitude: float = Field(..., description="Numerical latitude of the location.")
+    longitude: float = Field(..., description="Numerical longitude of the location.")
+
+class CountryInput(BaseModel):
+    country_name: str = Field(..., description="Common or official name of the country.")
+
+# ---------------------------------------------------------
+# Subclassed Strict Tools
+# ---------------------------------------------------------
+class GeocodeLocationTool(BaseTool):
+    name: str = "geocode_location"
+    description: str = "Finds latitude and longitude for a location name. Use this FIRST before checking weather."
+    args_schema: type[BaseModel] = GeocodeInput
     
-    Use this tool FIRST when you need to find the weather for a specific location but only have its name.
-    
-    Args:
-        query (str): The name of the location to search for (e.g., "Eiffel Tower", "Tokyo, Japan").
+    def _run(self, query: str) -> str:
+        url = "https://nominatim.openstreetmap.org/search"
+        params = {"q": query, "format": "json", "limit": 1}
+        headers = {"User-Agent": "CrewAIAgent_TestingApp/1.0"}
         
-    Returns:
-        str: A JSON string containing the location's display name, latitude (lat), and longitude (lon).
-             If the location is not found, it returns a JSON string with an error message.
-    """
-    url = "https://nominatim.openstreetmap.org/search"
-    params = {
-        "q": query,
-        "format": "json",
-        "limit": 1
-    }
-    headers = {
-        # Nominatim requires a distinct User-Agent
-        "User-Agent": "CrewAIAgent_TestingApp/1.0" 
-    }
+        try:
+            response = requests.get(url, params=params, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+            
+            if data:
+                result = data[0]
+                return json.dumps({
+                    "lat": float(result.get('lat')),
+                    "lon": float(result.get('lon')),
+                    "name": result.get('display_name')
+                })
+            return json.dumps({"err": "Not found"})
+                
+        except requests.exceptions.RequestException as e:
+            return json.dumps({"err": str(e)})
+
+
+class GetWeatherTool(BaseTool):
+    name: str = "get_weather"
+    description: str = "Fetches a 7-day weather forecast (min/max temperatures). MUST use numerical coordinates."
+    args_schema: type[BaseModel] = WeatherInput
     
-    try:
-        response = requests.get(url, params=params, headers=headers, verify=False)
-        response.raise_for_status()
-        data = response.json()
+    def _run(self, latitude: float, longitude: float) -> str:
+        url = "https://api.open-meteo.com/v1/forecast"
+        params = {
+            "latitude": latitude,
+            "longitude": longitude,
+            "daily": "temperature_2m_max,temperature_2m_min",
+            "timezone": "auto",
+            "forecast_days": 7
+        }
         
-        if data:
-            result = data[0]
+        try:
+            response = requests.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+            
+            daily = data.get("daily", {})
+            forecast = []
+            
+            if daily and "time" in daily:
+                for i in range(len(daily["time"])):
+                    forecast.append({
+                        "d": daily["time"][i],               
+                        "hi": daily["temperature_2m_max"][i], 
+                        "lo": daily["temperature_2m_min"][i]  
+                    })
+                    
             return json.dumps({
-                "success": True,
-                "display_name": result.get('display_name'),
-                "latitude": float(result.get('lat')),
-                "longitude": float(result.get('lon')),
-                "type": result.get('type')
+                "tz": data.get("timezone"),
+                "f": forecast 
             })
-        else:
-            return json.dumps({"success": False, "error": "Location not found."})
-            
-    except requests.exceptions.RequestException as e:
-        return json.dumps({"success": False, "error": f"Geocoding API request failed: {str(e)}"})
+                
+        except requests.exceptions.RequestException as e:
+            return json.dumps({"err": str(e)})
 
-@tool
-def get_weather(latitude: float, longitude: float) -> str:
-    """
-    Fetches the current weather and a 3-day forecast for a specific set of coordinates.
-    
-    You MUST provide numerical latitude and longitude. If you only have a city name, 
-    you must use the `geocode_location` tool first to get the coordinates.
-    
-    Args:
-        latitude (float): The geographical latitude.
-        longitude (float): The geographical longitude.
-        
-    Returns:
-        str: A JSON string containing current temperature (in Celsius), current wind speed (km/h), 
-             and a timezone indicator.
-    """
-    url = "https://api.open-meteo.com/v1/forecast"
-    params = {
-        "latitude": latitude,
-        "longitude": longitude,
-        "current_weather": "true",
-        "hourly": "temperature_2m,windspeed_10m",
-        "forecast_days": 3
-    }
-    
-    try:
-        response = requests.get(url, params=params, verify=False)
-        response.raise_for_status()
-        data = response.json()
-        
-        current = data.get("current_weather", {})
-        return json.dumps({
-            "success": True,
-            "current_temperature_celsius": current.get('temperature'),
-            "current_windspeed_kmh": current.get('windspeed'),
-            "timezone": data.get('timezone')
-        })
-            
-    except requests.exceptions.RequestException as e:
-        return json.dumps({"success": False, "error": f"Weather API request failed: {str(e)}"})
 
-@tool
-def get_country_data(country_name: str) -> str:
-    """
-    Retrieves demographic, geographic, and cultural data about a specific country.
+class GetCountryDataTool(BaseTool):
+    name: str = "get_country_data"
+    description: str = "Retrieves country demographics (capital, population, region, currencies)."
+    args_schema: type[BaseModel] = CountryInput
     
-    Use this tool when you need to know a country's capital, population, region, or official currency.
-    
-    Args:
-        country_name (str): The common or official name of the country (e.g., "France", "Brazil").
+    def _run(self, country_name: str) -> str:
+        url = f"https://restcountries.com/v3.1/name/{country_name}"
         
-    Returns:
-        str: A JSON string containing the official name, capital city, region, population, 
-             and a list of currencies used in the country.
-    """
-    url = f"https://restcountries.com/v3.1/name/{country_name}"
-    
-    try:
-        response = requests.get(url, verify=False)
-        response.raise_for_status()
-        data = response.json()
-        
-        if data and isinstance(data, list):
-            country = data[0]
+        try:
+            response = requests.get(url)
+            response.raise_for_status()
+            data = response.json()
             
-            # Safe extraction of nested data
-            currencies_dict = country.get("currencies", {})
-            curr_names = [info.get("name") for info in currencies_dict.values()]
-            
-            return json.dumps({
-                "success": True,
-                "official_name": country.get("name", {}).get("official", "Unknown"),
-                "capital": country.get("capital", ["Unknown"])[0],
-                "region": country.get("region", "Unknown"),
-                "population": country.get("population", 0),
-                "currencies": curr_names
-            })
-        return json.dumps({"success": False, "error": "Unexpected data format received."})
-            
-    except requests.exceptions.HTTPError as e:
-        if response.status_code == 404:
-            return json.dumps({"success": False, "error": "Country not found. Check the spelling."})
-        return json.dumps({"success": False, "error": f"HTTP Error: {str(e)}"})
-    except requests.exceptions.RequestException as e:
-        return json.dumps({"success": False, "error": f"Country API request failed: {str(e)}"})
+            if data and isinstance(data, list):
+                country = data[0]
+                curr_names = [info.get("name") for info in country.get("currencies", {}).values()]
+                
+                return json.dumps({
+                    "nm": country.get("name", {}).get("official", "N/A"),
+                    "cap": country.get("capital", ["N/A"])[0],
+                    "reg": country.get("region", "N/A"),
+                    "pop": country.get("population", 0),
+                    "cur": curr_names
+                })
+            return json.dumps({"err": "Bad format"})
+                
+        except requests.exceptions.HTTPError as e:
+            if response.status_code == 404:
+                return json.dumps({"err": "Not found"})
+            return json.dumps({"err": str(e)})
+        except requests.exceptions.RequestException as e:
+            return json.dumps({"err": str(e)})
+
+# Expose instances of the tools to be imported in agent.py
+geocode_location = GeocodeLocationTool()
+get_weather = GetWeatherTool()
+get_country_data = GetCountryDataTool()
