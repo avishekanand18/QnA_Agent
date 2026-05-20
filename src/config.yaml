@@ -1,0 +1,9 @@
+llm:
+  provider: "google"
+  model: "gemini-3.5-flash"
+  temperature: 0.1  # Low temperature for analytical, factual tasks
+  max_tokens: 4096
+
+embedder:
+  provider: "google"
+  model: "models/embedding-001"
