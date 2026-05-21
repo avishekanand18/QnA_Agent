@@ -22,6 +22,7 @@ A multi-agent, multi-API research assistant powered by CrewAI, Google Gemini 2.5
 ---
 
 ## 🗂️ Project Structure
+
 ```
 qa_agent/
 ├── main.py              # Streamlit UI entrypoint
@@ -32,10 +33,10 @@ qa_agent/
 │   ├── open_meteo.py
 │   └── rest_countries.py
 └── src/
-    ├── __init__.py
+    ├── __init__.py      # (empty)
     ├── agent.py         # CrewAI agent, task, and output models
-    ├── mcp_server.py    # Strict Pydantic API tools
-    ├── prompts.yaml     # System instructions and task templates
+    ├── mcp_server.py    # Strict, traced Pydantic API tools
+    ├── prompts.yaml     # YAML agent/task config & protocols
     └── config.yaml      # LLM and embedder config
 ```
 
@@ -45,14 +46,20 @@ qa_agent/
 
 ```mermaid
 graph TD
-    A[User (Streamlit UI)] -->|Query| B[Agent (CrewAI)]
-    B -->|Task| C[Tool: REST Countries]
-    B -->|Task| D[Tool: Nominatim]
-    B -->|Task| E[Tool: Open-Meteo]
-    C -->|Demographics| B
-    D -->|Coordinates| B
-    E -->|Weather| B
-    B -->|Structured Briefing| A
+    A[User Query via Streamlit] -->|Passes Context| B[Agent: Global Intelligence Analyst]
+    
+    subgraph CrewAI Orchestration
+        B -->|Needs Coordinates?| C[Tool: Nominatim]
+        B -->|Needs Weather?| D[Tool: Open-Meteo]
+        B -->|Needs Demographics?| E[Tool: REST Countries]
+        
+        C -.->|lat, lon| B
+        D -.->|forecast data| B
+        E -.->|capital, pop| B
+    end
+    
+    B -->|Strict Pydantic Model| F[LangSmith Telemetry Hook]
+    F -->|Render UI Elements| G[Streamlit Dashboard]
 ```
 
 - **LangSmith** traces all agent/tool runs, with custom tags and feedback.
@@ -61,19 +68,20 @@ graph TD
 ---
 
 ## 🖥️ Streamlit UI Preview
-- Chat interface with history
-- Metrics for capital, population, currencies
-- 7-day temperature trend chart
-- Error and success banners
+| Chat interface with history
+| Metrics for capital, population, currencies
+| 7-day temperature trend chart
+| Error and success banners
+| Token usage and LangSmith feedback
 
 ---
 
 ## 🛠️ API Tool Table
-| Tool Name         | API Used         | Input Model         | Output Data                |
-|-------------------|------------------|---------------------|----------------------------|
-| geocode_location  | Nominatim        | GeocodeInput        | lat, lon, display_name     |
-| get_weather       | Open-Meteo       | WeatherInput        | 7-day forecast, summary    |
-| get_country_data  | REST Countries   | CountryInput        | capital, population, curr. |
+| Tool Name         | API Used         | Input Model         | Output Data                | Tracing |
+|-------------------|------------------|---------------------|----------------------------|---------|
+| geocode_location  | Nominatim        | GeocodeInput        | lat, lon, display_name     | Yes     |
+| get_weather       | Open-Meteo       | WeatherInput        | 7-day forecast, summary    | Yes     |
+| get_country_data  | REST Countries   | CountryInput        | capital, population, curr. | Yes     |
 
 ---
 
@@ -86,6 +94,8 @@ graph TD
 | CountryDemographics    | capital: str, population: int, currencies: list[str]        |
 | IntelligenceBriefing   | location_found: bool, weather_summary: str, demographic_stats: CountryDemographics, raw_forecast: list |
 
+All models are strictly validated (`extra=forbid`) and enforced at every step.
+
 ---
 
 ## ⚡ Token Usage Optimization
@@ -97,17 +107,18 @@ graph TD
 ---
 
 ## 🔍 LangSmith Observability
-- All agent and tool runs are traced
-- Custom tags: session ID, user query, tool used, error/success
-- Feedback and metadata are attached to each run
-- Toggle tracing via `LANGSMITH_TRACING` env variable
+| All agent and tool runs are traced (via LangSmith and CrewAI)
+| Custom tags: session ID, user query, tool used, error/success
+| Feedback and efficiency scoring are attached to each run (see `src/agent.py`)
+| Toggle tracing via `LANGSMITH_TRACING` env variable
 
 ---
 
 ## 🛡️ Strict Pydantic Validation
-- All user inputs and API responses are validated
-- `extra=forbid` prevents accidental data leakage
-- Custom validators for edge cases
+| All user inputs and API responses are validated
+| `extra=forbid` prevents accidental data leakage
+| Custom validators for edge cases
+| All API tools are strictly typed and traced (see `src/mcp_server.py`)
 
 ---
 
@@ -123,6 +134,9 @@ graph TD
    ```sh
    streamlit run main.py
    ```
+
+**SSL Note:**
+If you encounter SSL certificate errors (especially on corporate networks), the code supports `truststore` injection. Install with `pip install truststore` and it will be used automatically if available.
 
 ---
 
@@ -141,6 +155,8 @@ graph TD
 - `test_api/nominatium.py`: Standalone geocoding API test
 - `test_api/rest_countries.py`: Standalone country data test
 
+All test scripts are self-contained and can be run directly for debugging API responses.
+
 ---
 
 ## 🛠️ Troubleshooting
@@ -150,23 +166,10 @@ graph TD
 | CrewAI/LangSmith telemetry     | Set `LANGSMITH_TRACING=false` in your environment             |
 | API changes                    | Update tool logic in `src/mcp_server.py`                      |
 | Pydantic validation errors     | Check input/output schemas and field types                     |
+| YAML config/protocols          | See `src/prompts.yaml` for agent/task logic and operational rules |
 
 ---
 
-## 📈 Example: 7-Day Temperature Trend Chart
-
-```mermaid
-%% Example line chart (Streamlit renders this from DataFrame)
-graph LR
-    A[Day 1] -- 22°C --> B[Day 2]
-    B -- 24°C --> C[Day 3]
-    C -- 23°C --> D[Day 4]
-    D -- 25°C --> E[Day 5]
-    E -- 26°C --> F[Day 6]
-    F -- 27°C --> G[Day 7]
-```
-
----
 
 ## 📜 License
 MIT License (or specify your license here)

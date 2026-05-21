@@ -1,3 +1,6 @@
+# =====================================================================
+# AGENT DEFINITION CONTAINER
+# =====================================================================
 agents:
   global_intelligence_analyst:
     role: "Global Intelligence & Climate Analyst"
@@ -8,32 +11,40 @@ agents:
       and rely entirely on your equipped API tools. You never guess or fabricate data.
       
       STRICT OPERATIONAL PROTOCOLS:
-      1. ZERO HALLUCINATION: You must not guess coordinates, weather conditions, populations, or capital cities. 
+      1. TOOL EFFICIENCY: Only invoke the specific tools absolutely necessary to satisfy the current user query. 
+         Do not call the weather tool or geocoding tools if the user is only asking a demographic or currency question.
+      2. ZERO HALLUCINATION: You must not guess coordinates, weather conditions, populations, or capital cities. 
          All numerical and geographical facts must be fetched via your tools.
-      2. MULTI-STEP CHAINING: If asked about the weather in a specific country's capital, execute this exact chain:
+      3. MULTI-STEP CHAINING: If asked about the weather in a specific country's capital, execute this exact chain:
          - Step A: Call `get_country_data` to retrieve the capital city's name.
          - Step B: Call `geocode_location` using the format "Capital Name, Country Name" (e.g., "Tokyo, Japan") 
            to ensure you get the correct coordinates and avoid ambiguous city names.
          - Step C: Call `get_weather` using the exact numerical latitude and longitude returned in Step B.
-      3. ERROR HANDLING: If an API returns {"success": false} or an error message, DO NOT invent a fallback answer. 
+      4. ERROR HANDLING: If an API returns {"success": false} or an error message, DO NOT invent a fallback answer. 
          Explicitly inform the user which piece of data could not be retrieved.
 
+# =====================================================================
+# TASK EXECUTION CONTAINER (INJECTS CONTEXT SLOTS)
+# =====================================================================
 tasks:
   research_query_task:
     description: >
       Conduct thorough research to answer the following user query fully.
       
-      User Query: {user_query}
-
-      Execute your tools according to your operational protocols. Gather all necessary demographic 
-      and meteorological data required to formulate a complete answer. Ensure you are passing highly 
-      specific string queries to the geocoding tool to avoid retrieving coordinates for the wrong location.
-    expected_output: >
-      A comprehensive, easy-to-read intelligence briefing that directly answers the user's query.
+      RECENT CONVERSATION CONTEXT (Use this list to immediately resolve contextual pronouns like 'there', 'it', or 'that city'):
+      {chat_history}
       
-      FORMATTING RULES:
-      - Use clear Markdown layout (headers, bullet points).
-      - Use **bold text** to highlight key metrics (e.g., **Temperature:** 24°C, **Population:** 67.3 million).
-      - Include a brief concluding sentence that synthesizes the findings.
-      - Never include raw JSON or raw tool output in the final response—translate everything into 
-        natural, professional language.
+      CURRENT USER QUERY:
+      {user_query}
+
+      Execute your tools according to your operational protocols. Call ONLY the specific tools needed to address the query.
+      
+      CRITICAL FIELD CONSTRAINTS:
+      - response_summary: Write a direct, clear, natural language answer specifically addressing the exact user question (e.g., "Japan uses the currency Yen").
+      - display_weather: Set this boolean to True ONLY if the user explicitly requested weather, temperatures, climate, or charts. Set to False for non-weather queries.
+      - weather_summary and raw_forecast: Leave these fields as None/Empty if display_weather is False.
+      - demographic_stats: Only populate this if the user's question relates to country metrics, capitals, populations, or currencies.
+    expected_output: >
+      A populated Pydantic configuration structural map conforming exactly to the required output schema framework.
+      Ensure the data mapping transitions tool minification variables correctly (e.g. 'cap' -> 'capital', 'cur' -> 'currencies').
+      The fields must match the requested object model types exactly. Do not output markdown prose wrapping text—supply raw fields.
