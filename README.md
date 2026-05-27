@@ -1,7 +1,7 @@
 
 # 🌍 Global Intelligence & Climate Portal
 
-A multi-agent, multi-API research assistant powered by CrewAI, Google Gemini 2.5 Flash, strict Pydantic validation, and a modern Streamlit UI. The agent synthesizes demographic, geographic, and meteorological data using:
+A multi-agent, multi-API research assistant powered by CrewAI, Google Gemini 3.5 Flash (with Groq support), strict Pydantic validation, LiteLLM routing, and a modern Streamlit UI. The agent synthesizes demographic, geographic, and meteorological data using:
 - **Open-Meteo** (weather)
 - **Nominatim** (geocoding)
 - **REST Countries** (demographics)
@@ -12,11 +12,13 @@ A multi-agent, multi-API research assistant powered by CrewAI, Google Gemini 2.5
 | Feature                        | Description                                                                 |
 |---------------------------------|-----------------------------------------------------------------------------|
 | Agentic Reasoning               | Multi-step tool chaining with CrewAI                                         |
+| Multi-Model Support             | Toggle between Google Gemini and Groq LLM providers via CLI                 |
 | Streamlit UI                    | Modern chat interface, metrics, and charts                                  |
-| LangSmith Tracing               | End-to-end observability, custom tags, and run metadata                     |
+| LangSmith Tracing               | Full observability with nested @traceable decorators and LiteLLM callbacks  |
+| LangSmith Threading             | Session-based organization for tracking related queries                      |
 | Strict Pydantic Validation      | All inputs/outputs validated, no extra fields allowed                       |
 | Token Usage Optimization        | Minimal prompts, concise outputs, and token tracking                        |
-| Modular API Tools               | Each API is a strict, typed CrewAI tool                                     |
+| Modular API Tools               | Each API is a strict, typed CrewAI tool with tracing                        |
 | Configurable Prompts            | YAML-based system instructions and task templates                           |
 
 ---
@@ -46,29 +48,37 @@ qa_agent/
 
 ```mermaid
 graph TD
-    A[User Query via Streamlit] -->|Passes Context| B[Agent: Global Intelligence Analyst]
+    A[User Query via Streamlit] -->|Passes Context & Model Choice| B["@traceable run_research_crew"]
+    B -->|Configures LLM| C[LiteLLM Engine with Callbacks]
+    C -->|Initializes Agent| D[Agent: Global Intelligence Analyst]
     
     subgraph CrewAI Orchestration
-        B -->|Needs Coordinates?| C[Tool: Nominatim]
-        B -->|Needs Weather?| D[Tool: Open-Meteo]
-        B -->|Needs Demographics?| E[Tool: REST Countries]
+        D -->|Needs Coordinates?| E["@traceable geocode_location<br/>Nominatim"]
+        D -->|Needs Weather?| F["@traceable get_weather<br/>Open-Meteo"]
+        D -->|Needs Demographics?| G["@traceable get_country_data<br/>REST Countries"]
         
-        C -.->|lat, lon| B
-        D -.->|forecast data| B
-        E -.->|capital, pop| B
+        E -.->|lat, lon| D
+        F -.->|forecast data| D
+        G -.->|capital, pop| D
     end
     
-    B -->|Strict Pydantic Model| F[LangSmith Telemetry Hook]
-    F -->|Render UI Elements| G[Streamlit Dashboard]
+    D -->|Strict Pydantic Model| H[IntelligenceBriefing]
+    H -->|Session ID & Metadata| I[LangSmith Run Tree]
+    I -->|Render UI Elements| J[Streamlit Dashboard]
 ```
 
-- **LangSmith** traces all agent/tool runs, with custom tags and feedback.
-- **Pydantic** models enforce strict schemas at every step.
+**Key Architecture Components:**
+- **@traceable Decorator**: Wraps `run_research_crew` and all tool methods to automatically create nested run tree
+- **LiteLLM Callbacks**: `litellm.success_callback` and `litellm.failure_callback` push LLM I/O directly to LangSmith
+- **Session Threading**: Session ID is added to run metadata, automatically populating "Threads" tab in LangSmith
+- **Pydantic Validation**: All inputs/outputs strictly validated with `extra=forbid`
+- **Strict Tool Caching**: Geocoding and demographics cached, weather always real-time
 
 ---
 
 ## 🖥️ Streamlit UI Preview
-| Chat interface with history
+| Active model selection display (Gemini or Groq)
+| Chat interface with history and session context
 | Metrics for capital, population, currencies
 | 7-day temperature trend chart
 | Error and success banners
@@ -77,11 +87,11 @@ graph TD
 ---
 
 ## 🛠️ API Tool Table
-| Tool Name         | API Used         | Input Model         | Output Data                | Tracing |
-|-------------------|------------------|---------------------|----------------------------|---------|
-| geocode_location  | Nominatim        | GeocodeInput        | lat, lon, display_name     | Yes     |
-| get_weather       | Open-Meteo       | WeatherInput        | 7-day forecast, summary    | Yes     |
-| get_country_data  | REST Countries   | CountryInput        | capital, population, curr. | Yes     |
+| Tool Name         | API Used         | Input Model         | Output Data                | Tracing        | Caching |
+|-------------------|------------------|---------------------|----------------------------|-----------------|---------|
+| geocode_location  | Nominatim        | GeocodeInput        | lat, lon, display_name     | @traceable      | Yes     |
+| get_weather       | Open-Meteo       | WeatherInput        | 7-day forecast, summary    | @traceable      | No      |
+| get_country_data  | REST Countries   | CountryInput        | capital, population, curr. | @traceable      | Yes     |
 
 ---
 
@@ -103,14 +113,61 @@ All models are strictly validated (`extra=forbid`) and enforced at every step.
 - Only essential context is passed to the LLM
 - Strict output schemas prevent verbose or irrelevant completions
 - Token usage can be tracked and displayed in the UI
+- LiteLLM callback system minimizes overhead by batching traces
 
 ---
 
-## 🔍 LangSmith Observability
-| All agent and tool runs are traced (via LangSmith and CrewAI)
-| Custom tags: session ID, user query, tool used, error/success
-| Feedback and efficiency scoring are attached to each run (see `src/agent.py`)
-| Toggle tracing via `LANGSMITH_TRACING` env variable
+## 📦 Core Dependencies
+The `requirements.txt` includes all necessary packages:
+
+| Package       | Purpose                                          |
+|---------------|--------------------------------------------------|
+| `crewai`      | Multi-agent orchestration framework              |
+| `requests`    | HTTP client for API calls                        |
+| `pydantic`    | Strict data validation                           |
+| `PyYAML`      | Configuration file parsing                       |
+| `streamlit`   | UI framework                                     |
+| `langsmith`   | Observability and tracing client                 |
+| `litellm`     | Unified LLM interface with routing               |
+| `certifi`     | SSL certificates (optional, for corporate SSL)   |
+
+Note: `litellm` is imported in `src/agent.py` for automatic LangSmith callback integration.
+
+---
+
+## 🔍 LangSmith Observability & Tracing Architecture
+- **Nested Run Trees**: Each tool and the main execution flow are wrapped in `@traceable` decorators
+- **Session Threading**: Session IDs are automatically added to run metadata, organizing queries into LangSmith Threads
+- **LiteLLM Callbacks**: Success/failure callbacks push all LLM I/O directly to LangSmith without blocking
+- **Custom Tags**: Runtime tags include status (success/not_found) and workflow type
+- **Feedback Scoring**: Resolution score and metadata attached to each run
+- **Run Metadata**: Session ID, location input, weather trigger, and efficiency metrics captured
+- **Toggle Tracing**: Set `LANGSMITH_TRACING=true` in environment to enable; defaults to disabled
+
+---
+
+## 📊 LiteLLM Integration & Multi-Model Support
+The application uses **LiteLLM** as the unified LLM engine with automatic LangSmith integration:
+
+- **Model Routing**: Seamlessly switch between Google Gemini and Groq via CLI argument
+- **Callback Pipeline**: LiteLLM automatically routes LLM calls to LangSmith without blocking
+  ```python
+  litellm.success_callback = ["langsmith"]
+  litellm.failure_callback = ["langsmith"]
+  ```
+- **Temperature Control**: Set to 0.1 for factual, analytical responses
+- **Token Limits**: Configured per model (default: 1024, max: 4096)
+- **Credential Management**: Respects environment variables `GEMINI_API_KEY` and `GROQ_API_KEY`
+
+---
+
+## 🔗 Session Management & LangSmith Threads
+Each query execution is tagged with a unique `session_id` to organize related queries:
+
+1. Session ID is passed through `run_research_crew` to the `@traceable` decorated wrapper
+2. Metadata is injected into the LangSmith Run Tree using `run_tree.add_metadata()`
+3. LangSmith automatically populates the **Threads** tab for easy navigation
+4. All nested tool calls inherit the session context
 
 ---
 
@@ -130,13 +187,25 @@ All models are strictly validated (`extra=forbid`) and enforced at every step.
    pip install -r requirements.txt
    ```
 4. **Configure LLM and embedder in `src/config.yaml`**
-5. **Run the app**
+   - Default: `gemini-3.5-flash` (Google Gemini)
+   - Optional: Set up `GROQ_API_KEY` for Groq support
+5. **Set up environment variables:**
    ```sh
+   export GEMINI_API_KEY="your-gemini-api-key"
+   export GROQ_API_KEY="your-groq-api-key"  # Optional
+   export LANGSMITH_TRACING="true"           # Optional, for LangSmith tracing
+   ```
+6. **Run the app with model selection:**
+   ```sh
+   # Use Gemini (default)
    streamlit run main.py
+   
+   # Or use Groq
+   streamlit run main.py -- --model groq
    ```
 
 **SSL Note:**
-If you encounter SSL certificate errors (especially on corporate networks), the code supports `truststore` injection. Install with `pip install truststore` and it will be used automatically if available.
+If you encounter SSL certificate errors (especially on corporate networks), the code supports `truststore` injection. Install with `pip install truststore` and it will be used automatically if available. The main.py also includes optional SSL bypass for corporate firewalls.
 
 ---
 
@@ -162,14 +231,15 @@ All test scripts are self-contained and can be run directly for debugging API re
 ## 🛠️ Troubleshooting
 | Problem                        | Solution                                                      |
 |--------------------------------|---------------------------------------------------------------|
-| SSL certificate errors         | `pip install certifi` or use truststore injection             |
-| CrewAI/LangSmith telemetry     | Set `LANGSMITH_TRACING=false` in your environment             |
+| SSL certificate errors         | `pip install certifi` or use truststore injection; SSL bypass in main.py disabled by default |
+| CrewAI/LangSmith telemetry     | Set `LANGSMITH_TRACING=true` in environment to enable tracing  |
 | API changes                    | Update tool logic in `src/mcp_server.py`                      |
-| Pydantic validation errors     | Check input/output schemas and field types                     |
+| Pydantic validation errors     | Check input/output schemas and field types in `src/agent.py`   |
 | YAML config/protocols          | See `src/prompts.yaml` for agent/task logic and operational rules |
+| Model selection issues         | Use `streamlit run main.py -- --model groq` or `--model gemini` |
+| LangSmith threading not visible| Ensure `LANGSMITH_API_KEY` is set and `LANGSMITH_TRACING=true`  |
 
 ---
-
 
 ## 📜 License
 MIT License (or specify your license here)
@@ -186,10 +256,3 @@ MIT License (or specify your license here)
 - [Streamlit](https://streamlit.io/)
 
 ---
-
-## Credits
-- [Open-Meteo](https://open-meteo.com/)
-- [Nominatim](https://nominatim.org/)
-- [REST Countries](https://restcountries.com/)
-- [CrewAI](https://crewai.com/)
-- [Google Gemini](https://ai.google/discover/gemini/)
