@@ -1,24 +1,23 @@
 import os
-import uuid
 import yaml
+import litellm  # TRACING UPDATE: Importing litellm directly to inject callbacks
 from typing import Optional, List
 from pydantic import BaseModel, Field
 from crewai import Agent, Task, Crew, Process, LLM
 from src.mcp_server import geocode_location, get_weather, get_country_data
 
+# TRACING UPDATE: We import native tracing components to manage the run tree
+from langsmith import Client, traceable
+from langsmith.run_helpers import get_current_run_tree
+
 # =====================================================================
-# BLOCK 1: TELEMETRY & MITM PROXY FAIL-SAFES
+# BLOCK 1: TELEMETRY FAIL-SAFES & LITELLM HOOKS
 # =====================================================================
-# This block isolates security handshakes and session state.
-# We mint a process-level string UUID so all user queries inside the same 
-# browser session merge into a single cleanly structured Thread inside LangSmith.
 try:
     import truststore
     truststore.inject_into_ssl()
 except ImportError:
     pass  # Optional requirement for corporate firewalls running SSL inspections
-
-_SESSION_ID = str(uuid.uuid4())
 
 # Set tracing variables dynamically depending on the upstream env toggle.
 if os.environ.get("LANGSMITH_TRACING", "").lower() == "true":
@@ -26,11 +25,11 @@ if os.environ.get("LANGSMITH_TRACING", "").lower() == "true":
 else:
     os.environ["LANGCHAIN_TRACING_V2"] = "false"
 
-# CRITICAL TRACING UPDATE (STEP 1):
-# We import tracing_v2_enabled to deeply wrap the execution context,
-# allowing LangChain to capture nested LLM and tool calls automatically.
-from langchain_core.tracers.context import tracing_v2_enabled
-from langsmith import Client
+# TRACING UPDATE: Force CrewAI's underlying LiteLLM engine to blast LLM Input/Output
+# directly to LangSmith. Because the @traceable context manager is active below,
+# LangSmith will catch these and nest them into the "Single Unit" tree automatically.
+litellm.success_callback = ["langsmith"]
+litellm.failure_callback = ["langsmith"]
 
 # =====================================================================
 # BLOCK 2: NESTED PYDANTIC OUTPUT DATA SCHEMAS
@@ -71,11 +70,10 @@ def load_yaml(filepath: str) -> dict:
 # =====================================================================
 # BLOCK 4: OUTCOME ENRICHMENT & LANGSMITH HOOK
 # =====================================================================
-def _annotate_run(run_id: str, query: str, briefing: IntelligenceBriefing, run_tree_context):
+def _annotate_run(run_id: str, query: str, briefing: IntelligenceBriefing, session_id: str):
     """
     Asynchronously patches metadata onto the root LangSmith run.
     Uses runtime introspection to extract telemetry attributes without blocking user flow.
-    Evaluates agent efficiency based on tool usage vs required output.
     """
     if os.environ.get("LANGSMITH_TRACING", "").lower() != "true":
         return
@@ -92,7 +90,7 @@ def _annotate_run(run_id: str, query: str, briefing: IntelligenceBriefing, run_t
             
         # 2. Structure metadata
         extra_metadata = {
-            "session_id": _SESSION_ID,
+            "session_id": session_id,
             "location_input": query,
             "display_weather_triggered": briefing.display_weather
         }
@@ -112,35 +110,6 @@ def _annotate_run(run_id: str, query: str, briefing: IntelligenceBriefing, run_t
             score=resolution_score,
             comment="Agent successfully resolved the query." if resolution_score == 1.0 else "Agent failed to resolve context."
         )
-
-        # -------------------------------------------------------------
-        # STEP 4: AGENT EFFICIENCY SCORING (NEW)
-        # -------------------------------------------------------------
-        if run_tree_context and hasattr(run_tree_context, 'child_runs'):
-            # Count how many times actual tools were invoked in the trace
-            tool_calls = sum(1 for child in run_tree_context.child_runs if child.run_type == "tool")
-            
-            efficiency_score = 1.0
-            efficiency_comment = "Agent routed tools perfectly."
-            
-            # Logic: If the user didn't ask for weather, but the agent called more than 1 tool
-            # (which implies it needlessly called Geocode or Weather), penalize it.
-            if not briefing.display_weather and tool_calls > 1:
-                efficiency_score = 0.0
-                efficiency_comment = f"Inefficient: User didn't request weather, but agent invoked {tool_calls} tools."
-            
-            # Logic: If the user DID ask for weather, it requires exactly 3 tools 
-            # (Country -> Geocode -> Weather). If it used more, it hallucinated a loop.
-            elif briefing.display_weather and tool_calls > 3:
-                efficiency_score = 0.5
-                efficiency_comment = f"Sub-optimal: Agent looped or hallucinated tools ({tool_calls} calls)."
-                
-            client.create_feedback(
-                run_id=run_id,
-                key="agent_tool_efficiency",
-                score=efficiency_score,
-                comment=efficiency_comment
-            )
             
     except Exception as e:
         print(f"Telemetry Warning: Failed to ship LangSmith trace update: {e}")
@@ -148,29 +117,45 @@ def _annotate_run(run_id: str, query: str, briefing: IntelligenceBriefing, run_t
 # =====================================================================
 # BLOCK 5: MAIN EXECUTION CONTAINER (THE CREW KICKOFF)
 # =====================================================================
-# Removed the @traceable decorator here. We now handle tracing explicitly 
-# inside the function using the LangChain context manager.
-
-def run_research_crew(user_query: str, chat_history: str = "") -> IntelligenceBriefing:
+# TRACING UPDATE: We wrap the entire execution in @traceable. 
+# This automatically creates a 'Single Unit' trace named "UI_Interaction_Flow"
+# Every LLM node, agent step, and tool call will nest perfectly underneath this unit.
+@traceable(name="UI_Interaction_Flow", run_type="chain")
+def run_research_crew(user_query: str, chat_history: str = "", model_choice: str = "gemini", session_id: str = "default_session") -> IntelligenceBriefing:
     """
-    Accepts user prompts and short-term memory fragments.
+    Accepts user prompts, short-term memory fragments, and the requested model routing.
     Configures and spawns an instance of the automated multi-tool research task.
     """
+    # Grab the active LangSmith Run Tree created by the @traceable decorator
+    run_tree = get_current_run_tree()
+    
+    # Push the persistent session ID directly into the tree metadata.
+    # This is the secret mechanism that populates the "Threads" tab in LangSmith.
+    if run_tree:
+        run_tree.add_metadata({"session_id": session_id})
+
     # Locating path routes safely within the project setup directory tree
     base_dir = os.path.dirname(os.path.abspath(__file__))
     config = load_yaml(os.path.join(base_dir, 'config.yaml'))
     prompts = load_yaml(os.path.join(base_dir, 'prompts.yaml'))
 
-    # Construct the foundational LiteLLM routing prefix for Google Gemini
     llm_config = config.get('llm', {})
-    model_name = f"{llm_config.get('provider', 'gemini')}/{llm_config.get('model', 'gemini-2.5-flash')}"
     
-    # Instantiate the LiteLLM execution class wrapper
+    # TRACING UPDATE: We reverted back to CrewAI's native `LLM` to satisfy Pydantic
+    # strict validation. LiteLLM will handle the LangSmith traces behind the scenes.
+    if model_choice.lower() == "groq":
+        model_name = "groq/llama3-8b-8192" 
+        active_api_key = os.environ.get("GROQ_API_KEY")
+    else:
+        model_name = f"{llm_config.get('provider', 'gemini')}/{llm_config.get('model', 'gemini-2.5-flash')}"
+        active_api_key = os.environ.get("GEMINI_API_KEY")
+
+    # Instantiate the native CrewAI execution class wrapper 
     my_llm = LLM(
         model=model_name,
         temperature=llm_config.get('temperature', 0.1),
         max_tokens=llm_config.get('max_tokens', 1024),
-        api_key=os.environ.get("GEMINI_API_KEY")
+        api_key=active_api_key
     )
 
     # Initialize the core CrewAI intelligence agent entity
@@ -202,29 +187,17 @@ def run_research_crew(user_query: str, chat_history: str = "") -> IntelligenceBr
         verbose=True
     )
 
-    # CRITICAL TRACING UPDATE (STEP 1):
-    # We wrap the kickoff execution in the tracing_v2_enabled context.
-    # This forces LangChain/CrewAI to capture every nested tool and LLM run 
-    # under a single root trace named "Intelligence_Agent_Workflow".
-    
-    with tracing_v2_enabled(project_name=os.environ.get("LANGCHAIN_PROJECT", "default")) as cb:
-        crew_output = crew.kickoff(inputs={
-            'user_query': user_query,
-            'chat_history': chat_history
-        })
+    # Kickoff the agent workflow natively. It will automatically attach to the active Run Tree.
+    crew_output = crew.kickoff(inputs={
+        'user_query': user_query,
+        'chat_history': chat_history
+    })
         
-        # Extract the root run ID from the context callback to annotate it later
-        if cb and cb.latest_run:
-            root_run_id = cb.latest_run.id
-        else:
-            root_run_id = None
-    
     # Retrieve the structured Pydantic class payload parsed directly by the orchestration architecture
     briefing = crew_output.pydantic
     
     # Perform outcome enrichment logic on the root run we just captured
-    if root_run_id:
-        # Pass the callback context (cb) so we can inspect the child runs
-        _annotate_run(root_run_id, user_query, briefing, cb.latest_run)
+    if run_tree:
+        _annotate_run(str(run_tree.id), user_query, briefing, session_id)
         
     return briefing

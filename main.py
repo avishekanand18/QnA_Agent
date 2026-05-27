@@ -1,3 +1,17 @@
+import os
+import ssl
+import argparse
+import uuid
+
+# =====================================================================
+# BLOCK 0: CORPORATE FIREWALL SSL BYPASS
+# =====================================================================
+# Force standard Python and underlying C-libraries to ignore self-signed 
+# corporate MITM certificates. (Remove or comment out if not needed).
+os.environ['CURL_CA_BUNDLE'] = ''
+os.environ['REQUESTS_CA_BUNDLE'] = ''
+ssl._create_default_https_context = ssl._create_unverified_context
+
 import streamlit as st
 import pandas as pd
 from dotenv import load_dotenv
@@ -9,6 +23,12 @@ from dotenv import load_dotenv
 # CrewAI and the LangSmith client hooks activate with the correct settings.
 load_dotenv()
 
+# Parse command line arguments for model routing
+parser = argparse.ArgumentParser(description="Global Intelligence Portal")
+parser.add_argument("--model", type=str, default="gemini", choices=["gemini", "groq"], help="Select the underlying LLM provider.")
+args, unknown = parser.parse_known_args()
+SELECTED_MODEL = args.model
+
 from src.agent import run_research_crew
 
 # Configure frontend dashboard parameters
@@ -19,7 +39,7 @@ st.set_page_config(
 )
 
 st.title("🌍 Global Intelligence & Climate Portal")
-st.caption("Enhanced UI Pipeline Featuring Double-Tier TTL Caching & Short-Term Context Memory Routing")
+st.caption(f"Enhanced UI Pipeline Featuring Double-Tier TTL Caching & Short-Term Context Memory Routing (Active Model: {SELECTED_MODEL.upper()})")
 
 # =====================================================================
 # BLOCK 2: APP-LEVEL APPLICATION TTL CACHING CONTAINER
@@ -27,13 +47,14 @@ st.caption("Enhanced UI Pipeline Featuring Double-Tier TTL Caching & Short-Term 
 # This cache acts as our primary defense mechanism. 
 # If a query and its conversation context match an identical request seen 
 # within 30 minutes, it skips the LLM and APIs entirely, costing 0 tokens.
+# We also cache based on the model choice so swapping models invalidates the cache properly.
 @st.cache_data(ttl=1800, show_spinner=False)
-def cached_research_crew_execution(query: str, formatted_history: str):
+def cached_research_crew_execution(query: str, formatted_history: str, model_choice: str, session_id: str):
     """
     App-level caching proxy router.
     Locks operations down to exact query and memory argument signatures.
     """
-    return run_research_crew(query, formatted_history)
+    return run_research_crew(query, formatted_history, model_choice, session_id)
 
 # =====================================================================
 # BLOCK 3: MODULAR USER INTERFACE RENDERING ENGINE
@@ -94,6 +115,12 @@ def render_briefing_dashboard(briefing):
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+# TRACING UPDATE: We establish a persistent UI session ID here. 
+# This ensures all questions asked within this browser tab are grouped 
+# into a single Thread inside LangSmith.
+if "langsmith_session_id" not in st.session_state:
+    st.session_state.langsmith_session_id = str(uuid.uuid4())
+
 # Continuously loop and draw message components if entries persist inside state history
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
@@ -133,8 +160,13 @@ if user_input := st.chat_input("Query country records or climate profiles (e.g.,
                     
                     memory_string = f"Prior User Inquiry: '{prev_user}' -> Prior Assistant Discovery: '{prev_assistant}'"
                 
-                # Run the query through our caching proxy layer
-                briefing_payload = cached_research_crew_execution(user_input, memory_string)
+                # Run the query through our caching proxy layer, passing the selected model and persistent session ID
+                briefing_payload = cached_research_crew_execution(
+                    user_input, 
+                    memory_string, 
+                    SELECTED_MODEL, 
+                    st.session_state.langsmith_session_id
+                )
                 
                 # Push structural components straight onto user interface dashboard layout
                 render_briefing_dashboard(briefing_payload)
